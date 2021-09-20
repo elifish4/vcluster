@@ -116,7 +116,7 @@ func (cmd *ConnectCmd) Connect(vclusterName string) error {
 	var out []byte
 	printedWaiting := false
 	err = wait.PollImmediate(time.Second*2, time.Minute*5, func() (done bool, err error) {
-		args := []string{"exec", "--namespace", cmd.Namespace, "-c", "syncer", podName, "--", "cat", "/root/.kube/config"}
+		args := []string{"exec", "--namespace", cmd.Namespace, "-c", "syncer", podName, "--", "cat", "/data/.kube/config"}
 		if cmd.Context != "" {
 			newArgs := []string{"--context", cmd.Context}
 			newArgs = append(newArgs, args...)

@@ -22,7 +22,7 @@ func WriteKubeConfig(ctx context.Context, client client.Client, secretName, secr
 		return err
 	}
 
-	err = os.MkdirAll("/root/.kube", 0755)
+	err = os.MkdirAll("/data/.kube", 0755)
 	if err != nil {
 		return err
 	}
