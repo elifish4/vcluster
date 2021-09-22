@@ -23,7 +23,7 @@ import (
 )
 
 var (
-	certPath = "/data//var/lib/vcluster/tls"
+	certPath = "/data/var/lib/vcluster/tls"
 )
 
 type Syncer interface {
