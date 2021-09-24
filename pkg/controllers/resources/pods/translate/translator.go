@@ -11,9 +11,11 @@ import (
 	"github.com/loft-sh/vcluster/pkg/util/translate"
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/keyutil"
 	"k8s.io/utils/pointer"
 	"regexp"
@@ -30,12 +32,6 @@ const (
 	UIDAnnotation                 = "vcluster.loft.sh/uid"
 	ServiceAccountNameAnnotation  = "vcluster.loft.sh/service-account-name"
 	ServiceAccountTokenAnnotation = "vcluster.loft.sh/token-"
-
-	DisableSubdomainRewriteAnnotation = "vcluster.loft.sh/disable-subdomain-rewrite"
-	HostsRewrittenAnnotation          = "vcluster.loft.sh/hosts-rewritten"
-	HostsVolumeName                   = "vcluster-rewrite-hosts"
-	HostsRewriteImage                 = "alpine:3.13.1"
-	HostsRewriteContainerName         = "vcluster-rewrite-hosts"
 )
 
 var (
@@ -69,6 +65,7 @@ func NewTranslator(ctx *context2.ControllerContext) (Translator, error) {
 	}
 
 	return &translator{
+		vClientConfig:   ctx.VirtualManager.GetConfig(),
 		vClient:         ctx.VirtualManager.GetClient(),
 		imageTranslator: imageTranslator,
 		tokenGenerator:  tokenGenerator,
@@ -83,6 +80,7 @@ func NewTranslator(ctx *context2.ControllerContext) (Translator, error) {
 }
 
 type translator struct {
+	vClientConfig   *rest.Config
 	vClient         client.Client
 	tokenGenerator  serviceaccount.TokenGenerator
 	imageTranslator ImageTranslator
@@ -313,6 +311,9 @@ func (t *translator) Translate(vPod *corev1.Pod, services []*corev1.Service, dns
 		Hostnames: []string{"kubernetes", "kubernetes.default", "kubernetes.default.svc"},
 	})
 
+	// translate the dns config
+	t.translateDNSConfig(pPod, vPod, dnsIP)
+
 	// truncate hostname if needed
 	if pPod.Spec.Hostname == "" {
 		if len(vPod.Name) > 63 {
@@ -320,51 +321,22 @@ func (t *translator) Translate(vPod *corev1.Pod, services []*corev1.Service, dns
 		} else {
 			pPod.Spec.Hostname = vPod.Name
 		}
-	}
 
-	// translate the dns config
-	t.translateDNSConfig(pPod, vPod, dnsIP)
+		// Kubernetes does not support setting the hostname to a value that
+		// includes a '.', therefore we need to rewrite the hostname. This is really bad
+		// and wrong, but unfortunately there is currently no other solution as there is
+		// no other way to change the container's hostname.
+		if strings.Contains(pPod.Spec.Hostname, ".") {
+			pPod.Spec.Hostname = strings.Replace(pPod.Spec.Hostname, ".", "-", -1)
+		}
+	}
 
 	// if spec.subdomain is set we have to translate the /etc/hosts
 	// because otherwise we could get a different hostname as if the pod
 	// would be deployed in a non virtual kubernetes cluster
-	overrideHosts := false
 	if pPod.Spec.Subdomain != "" {
-		if t.overrideHosts == true && (pPod.Annotations == nil || pPod.Annotations[DisableSubdomainRewriteAnnotation] != "true") {
-			overrideHosts = true
-			initContainer := corev1.Container{
-				Name:    HostsRewriteContainerName,
-				Image:   t.overrideHostsImage,
-				Command: []string{"sh"},
-				Args:    []string{"-c", "sed -E -e 's/^(\\d+.\\d+.\\d+.\\d+\\s+)" + pPod.Spec.Hostname + "$/\\1 " + pPod.Spec.Hostname + "." + pPod.Spec.Subdomain + "." + vPod.Namespace + ".svc." + t.clusterDomain + " " + pPod.Spec.Hostname + "/' /etc/hosts > /hosts/hosts"},
-				VolumeMounts: []corev1.VolumeMount{
-					{
-						MountPath: "/hosts",
-						Name:      HostsVolumeName,
-					},
-				},
-			}
-
-			// Add volume
-			if pPod.Spec.Volumes == nil {
-				pPod.Spec.Volumes = []corev1.Volume{}
-			}
-			pPod.Spec.Volumes = append(pPod.Spec.Volumes, corev1.Volume{
-				Name: HostsVolumeName,
-				VolumeSource: corev1.VolumeSource{
-					EmptyDir: &corev1.EmptyDirVolumeSource{},
-				},
-			})
-
-			// Add init container
-			newContainers := []corev1.Container{initContainer}
-			newContainers = append(newContainers, pPod.Spec.InitContainers...)
-			pPod.Spec.InitContainers = newContainers
-
-			if pPod.Annotations == nil {
-				pPod.Annotations = map[string]string{}
-			}
-			pPod.Annotations[HostsRewrittenAnnotation] = "true"
+		if t.overrideHosts == true {
+			rewritePodHostnameFQDN(pPod, t.overrideHostsImage, pPod.Spec.Hostname, pPod.Spec.Hostname, pPod.Spec.Hostname+"."+pPod.Spec.Subdomain+"."+vPod.Namespace+".svc."+t.clusterDomain)
 		}
 
 		pPod.Spec.Subdomain = ""
@@ -374,51 +346,18 @@ func (t *translator) Translate(vPod *corev1.Pod, services []*corev1.Service, dns
 	for i := range pPod.Spec.Containers {
 		translateContainerEnv(&pPod.Spec.Containers[i], vPod, serviceEnv)
 		pPod.Spec.Containers[i].Image = t.imageTranslator.Translate(pPod.Spec.Containers[i].Image)
-
-		if overrideHosts {
-			if pPod.Spec.Containers[i].VolumeMounts == nil {
-				pPod.Spec.Containers[i].VolumeMounts = []corev1.VolumeMount{}
-			}
-			pPod.Spec.Containers[i].VolumeMounts = append(pPod.Spec.Containers[i].VolumeMounts, corev1.VolumeMount{
-				MountPath: "/etc/hosts",
-				Name:      HostsVolumeName,
-				SubPath:   "hosts",
-			})
-		}
 	}
 
 	// translate init containers
 	for i := range pPod.Spec.InitContainers {
 		translateContainerEnv(&pPod.Spec.InitContainers[i], vPod, serviceEnv)
 		pPod.Spec.InitContainers[i].Image = t.imageTranslator.Translate(pPod.Spec.InitContainers[i].Image)
-
-		if pPod.Spec.InitContainers[i].Name != HostsRewriteContainerName && overrideHosts {
-			if pPod.Spec.InitContainers[i].VolumeMounts == nil {
-				pPod.Spec.InitContainers[i].VolumeMounts = []corev1.VolumeMount{}
-			}
-			pPod.Spec.InitContainers[i].VolumeMounts = append(pPod.Spec.InitContainers[i].VolumeMounts, corev1.VolumeMount{
-				MountPath: "/etc/hosts",
-				Name:      HostsVolumeName,
-				SubPath:   "hosts",
-			})
-		}
 	}
 
 	// translate ephemereal containers
 	for i := range pPod.Spec.EphemeralContainers {
 		translateEphemerealContainerEnv(&pPod.Spec.EphemeralContainers[i], vPod, serviceEnv)
 		pPod.Spec.EphemeralContainers[i].Image = t.imageTranslator.Translate(pPod.Spec.EphemeralContainers[i].Image)
-
-		if overrideHosts {
-			if pPod.Spec.EphemeralContainers[i].VolumeMounts == nil {
-				pPod.Spec.EphemeralContainers[i].VolumeMounts = []corev1.VolumeMount{}
-			}
-			pPod.Spec.EphemeralContainers[i].VolumeMounts = append(pPod.Spec.EphemeralContainers[i].VolumeMounts, corev1.VolumeMount{
-				MountPath: "/etc/hosts",
-				Name:      HostsVolumeName,
-				SubPath:   "hosts",
-			})
-		}
 	}
 
 	// translate image pull secrets
@@ -543,10 +482,10 @@ func (t *translator) translateProjectedVolume(projectedVolume *corev1.ProjectedV
 				serviceAccountName = vPod.Spec.DeprecatedServiceAccount
 			}
 
-			serviceAccount := corev1.ServiceAccount{}
-			err := t.vClient.Get(context.Background(), types.NamespacedName{Namespace: vPod.Namespace, Name: serviceAccountName}, &serviceAccount)
+			// create new client
+			vClient, err := kubernetes.NewForConfig(t.vClientConfig)
 			if err != nil {
-				return errors.Wrapf(err, "get service account "+serviceAccountName)
+				return errors.Wrap(err, "create client")
 			}
 
 			audience := "https://kubernetes.default.svc." + t.clusterDomain
@@ -554,10 +493,23 @@ func (t *translator) translateProjectedVolume(projectedVolume *corev1.ProjectedV
 				audience = projectedVolume.Sources[i].ServiceAccountToken.Audience
 			}
 
-			public, private := serviceaccount.Claims(serviceAccount, vPod, nil, 10*365*24*60*60, 0, []string{audience})
-			serviceAccountToken, err := t.tokenGenerator.GenerateToken(public, private)
+			expirationSeconds := int64(10 * 365 * 24 * 60 * 60)
+			token, err := vClient.CoreV1().ServiceAccounts(vPod.Namespace).CreateToken(context.Background(), serviceAccountName, &authenticationv1.TokenRequest{
+				Spec: authenticationv1.TokenRequestSpec{
+					Audiences: []string{audience},
+					BoundObjectRef: &authenticationv1.BoundObjectReference{
+						APIVersion: corev1.SchemeGroupVersion.String(),
+						Kind:       "Pod",
+						Name:       vPod.Name,
+						UID:        vPod.UID,
+					},
+					ExpirationSeconds: &expirationSeconds,
+				},
+			}, metav1.CreateOptions{})
 			if err != nil {
-				return errors.Wrap(err, "generate token")
+				return errors.Wrap(err, "create token")
+			} else if token.Status.Token == "" {
+				return errors.New("received empty token")
 			}
 
 			// set the token as annotation
@@ -568,7 +520,7 @@ func (t *translator) translateProjectedVolume(projectedVolume *corev1.ProjectedV
 			for {
 				annotation = ServiceAccountTokenAnnotation + random.RandomString(8)
 				if pPod.Annotations[annotation] == "" {
-					pPod.Annotations[annotation] = serviceAccountToken
+					pPod.Annotations[annotation] = token.Status.Token
 					break
 				}
 			}
