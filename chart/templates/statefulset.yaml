@@ -47,6 +47,11 @@ spec:
       terminationGracePeriodSeconds: 10
       nodeSelector:
 {{ toYaml .Values.nodeSelector | indent 8 }}
+    {{- if .Values.global.securityContext.enabled }}
+      securityContext:
+        runAsUser: {{ .Values.global.securityContext.runAsUser }}
+        fsGroup: {{ .Values.global.securityContext.fsGroup }}
+    {{- end }}
       affinity:
 {{ toYaml .Values.affinity | indent 8 }}
       tolerations:
