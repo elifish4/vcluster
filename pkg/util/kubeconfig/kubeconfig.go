@@ -27,7 +27,7 @@ func WriteKubeConfig(ctx context.Context, client client.Client, secretName, secr
 		return err
 	}
 
-	err = ioutil.WriteFile("/root/.kube/config", out, 0666)
+	err = ioutil.WriteFile("/data/.kube/config", out, 0666)
 	if err != nil {
 		return err
 	}
