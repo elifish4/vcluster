@@ -1,3 +1,9 @@
+global:
+  securityContext:
+    # SecurityContext for the execution 
+    enabled: false
+    runAsUser: 1000
+    fsGroup: 1000
 # Syncer configuration
 syncer:
   # Image to use for the syncer
@@ -58,6 +64,7 @@ storage:
   # If this is disabled, vcluster will use an emptyDir instead
   # of a PersistentVolumeClaim
   persistence: true
+  className: ""
   # Size of the persistent volume claim
   size: 5Gi
   
@@ -67,6 +74,8 @@ volumes: []
 # Service account that should be used by the vcluster
 serviceAccount:
   create: true
+  imagePullSecrets:
+    - name: pulling-secret
   # Optional name of the service account to use
   # name: default
 
