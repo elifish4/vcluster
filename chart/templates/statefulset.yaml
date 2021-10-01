@@ -75,6 +75,7 @@ spec:
       {{- if not .Values.vcluster.disabled }}
       - image: {{ .Values.vcluster.image }}
         name: vcluster
+        imagePullPolicy: Always
         command:
           {{- range $f := .Values.vcluster.command }}
           - {{ $f | quote }}
